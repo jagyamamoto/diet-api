@@ -1,132 +1,99 @@
-# main.py  ---------------------------------------------------------------
-from fastapi import FastAPI, UploadFile, File
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from datetime import datetime, timezone, timedelta
-import io, zipfile, xml.etree.ElementTree as ET
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.responses import JSONResponse
 from typing import Optional
-from PIL import Image
-import piexif
+from datetime import datetime, timedelta
+import os, uuid, yaml
 
-app = FastAPI(title="Diet Assistant API")
+app = FastAPI()
 
-# CORS（必要ならドメインを限定してください）
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+BASE_DIR = "data"
+os.makedirs(BASE_DIR, exist_ok=True)
 
-# ---------- 共通レスポンス ---------- #
-class LogOutput(BaseModel):
-    yaml: str
-    advice: str
+# 1. ランダムユーザーID発行
+def generate_user_id():
+    return f"user_{uuid.uuid4().hex[:8]}"
 
-# ---------------------------------------------------------------------- #
-# 1) /log  テキスト入力
-# ---------------------------------------------------------------------- #
-class LogInput(BaseModel):
-    entry_type: str
-    content: str
+@app.post("/register_user")
+def register_user():
+    user_id = generate_user_id()
+    user_path = os.path.join(BASE_DIR, user_id)
+    os.makedirs(user_path, exist_ok=True)
+    return {"user_id": user_id}
 
-@app.post("/log", response_model=LogOutput)
-def log_text(input: LogInput):
-    yaml = f"entry_type: {input.entry_type}\ncontent: {input.content}"
-    return {
-        "yaml": yaml,
-        "advice": "『主食・主菜・副菜をそろえよう』"
+# 1a. 現在のユーザーIDを確認
+@app.get("/current_user")
+def current_user(user_id: str):
+    user_path = os.path.join(BASE_DIR, user_id)
+    if os.path.exists(user_path):
+        return {"user_id": user_id, "status": "exists"}
+    return {"error": "user_id not found"}
+
+# 2. 写真投稿（投稿時間 = 食事時間）
+@app.post("/photo_log")
+def photo_log(user_id: str = Form(...), file: UploadFile = File(...)):
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    
+    post_time = datetime.now()
+    timestamp = post_time.strftime("%Y%m%dT%H%M")
+    filename = f"{timestamp}.yaml"
+    user_dir = os.path.join(BASE_DIR, user_id)
+    os.makedirs(user_dir, exist_ok=True)
+    
+    # YAML保存
+    data = {
+        "entry_type": "photo",
+        "filename": file.filename,
+        "photo_taken": post_time.strftime("%Y-%m-%d %H:%M:%S"),
+        "posted_time": post_time.strftime("%Y-%m-%d %H:%M:%S"),
+        "version": "original"
     }
+    with open(os.path.join(user_dir, filename), "w") as f:
+        yaml.dump(data, f, allow_unicode=True)
 
-# ---------------------------------------------------------------------- #
-# 2) /photo_log  Exif 解析
-# ---------------------------------------------------------------------- #
-@app.post("/photo_log", response_model=LogOutput)
-async def photo_log(file: UploadFile = File(...)):
+    return {"yaml": yaml.dump(data), "advice": "『投稿時間を食事時間として登録しました』"}
+
+# 3. 修正投稿（更新版として保存）
+@app.post("/update_log")
+def update_log(user_id: str = Form(...), timestamp: str = Form(...), content: str = Form(...)):
+    user_dir = os.path.join(BASE_DIR, user_id)
+    if not os.path.exists(user_dir):
+        raise HTTPException(status_code=404, detail="user not found")
+    
+    filename = f"{timestamp}.updated.yaml"
+    data = yaml.safe_load(content)
+    data["version"] = "updated"
+
+    with open(os.path.join(user_dir, filename), "w") as f:
+        yaml.dump(data, f, allow_unicode=True)
+
+    return {"yaml": yaml.dump(data), "advice": "『修正内容を更新版として保存しました』"}
+
+# 4. 1日まとめ
+@app.post("/daily_summary")
+def daily_summary(user_id: str = Form(...), date: str = Form(...)):
     try:
-        img_bytes = await file.read()
-        img = Image.open(io.BytesIO(img_bytes))
-        exif_data = img.info.get("exif")
+        base_date = datetime.strptime(date, "%Y-%m-%d")
+    except:
+        raise HTTPException(status_code=400, detail="Invalid date format")
 
-        if not exif_data:
-            return {
-                "yaml": "entry_type: photo\nerror: Exif情報がありません",
-                "advice": "Exifが無いため撮影時間を特定できませんでした"
-            }
+    start = base_date.replace(hour=2)
+    end = start + timedelta(hours=24)
+    user_dir = os.path.join(BASE_DIR, user_id)
+    if not os.path.exists(user_dir):
+        raise HTTPException(status_code=404, detail="user not found")
 
-        exif_dict = piexif.load(exif_data)
-        dt_bytes: Optional[bytes] = exif_dict["Exif"].get(piexif.ExifIFD.DateTimeOriginal)
-        dt_str = dt_bytes.decode("utf-8") if dt_bytes else "Exifに日時がありません"
+    summary = []
+    for fname in sorted(os.listdir(user_dir)):
+        if fname.endswith(".yaml"):
+            timestamp = fname[:13]  # YYYYMMDDTHHMM
+            try:
+                dt = datetime.strptime(timestamp, "%Y%m%dT%H%M")
+            except:
+                continue
+            if start <= dt < end:
+                with open(os.path.join(user_dir, fname)) as f:
+                    yml = yaml.safe_load(f)
+                    summary.append(yml)
 
-        yaml = f"entry_type: photo\nfilename: {file.filename}\nphoto_taken: \"{dt_str}\""
-        return {
-            "yaml": yaml,
-            "advice": "『撮影時間＝食事時間としてログしました』"
-        }
-    except Exception as e:
-        return {
-            "yaml": "entry_type: photo\nerror: Exif解析に失敗",
-            "advice": f"エラー: {str(e)}"
-        }
-
-# ---------------------------------------------------------------------- #
-# 3) /daily_summary  指定日の統括（簡易版）
-# ---------------------------------------------------------------------- #
-class SummaryInput(BaseModel):
-    date: str  # YYYY-MM-DD
-
-@app.post("/daily_summary", response_model=LogOutput)
-def daily_summary(input: SummaryInput):
-    yaml = (
-        f"summary_date: {input.date}\n"
-        f"meals: 3\n"
-        f"steps: 7200\n"
-        f"exercise_minutes: 25"
-    )
-    advice = f"『{input.date} はよく動けています。水分を多めにとりましょう』"
-    return {"yaml": yaml, "advice": advice}
-
-# ---------------------------------------------------------------------- #
-# 4) /apple_health_zip  ヘルスケア ZIP アップロード
-# ---------------------------------------------------------------------- #
-@app.post("/apple_health_zip", response_model=LogOutput)
-async def apple_health_zip(file: UploadFile = File(...)):
-    """iPhone ヘルスケアの export.zip を受け取り、歩数合計を抽出する"""
-    try:
-        raw = await file.read()
-
-        # -- ZIP を開き、export.xml を読み込み --
-        with zipfile.ZipFile(io.BytesIO(raw)) as z:
-            xml_bytes = z.read("apple_health_export/export.xml")
-
-        # -- 逐次パース（大容量でもOK） --
-        steps_total = 0
-        for event, elem in ET.iterparse(io.BytesIO(xml_bytes), events=("end",)):
-            if elem.tag.endswith("Record") and \
-               elem.attrib.get("type") == "HKQuantityTypeIdentifierStepCount":
-                steps_total += int(float(elem.attrib["value"]))
-            elem.clear()  # メモリ節約
-
-        jst = timezone(timedelta(hours=+9))
-        today = datetime.now(jst).strftime("%Y-%m-%d")
-
-        yaml = (
-            f"date: {today}\n"
-            f"apple_health:\n"
-            f"  steps: {steps_total}"
-        )
-        advice = "『目標 8000 歩にあと少し！階段を選んで達成しましょう』"
-        return {"yaml": yaml, "advice": advice}
-
-    except Exception as e:
-        return {
-            "yaml": "apple_health: error",
-            "advice": f"ZIP解析エラー: {str(e)}"
-        }
-
-# ---------------------------------------------------------------------- #
-# ルート確認用（オプション）
-# ---------------------------------------------------------------------- #
-@app.get("/")
-def root():
-    return {"status": "ok", "message": "Diet Assistant API is running"}
+    return {"yaml": yaml.dump(summary, allow_unicode=True), "advice": f"『{date}のまとめを生成しました（{len(summary)}件）』"}
