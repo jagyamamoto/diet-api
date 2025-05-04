@@ -27,6 +27,17 @@ os.makedirs(BASE_DIR, exist_ok=True)
 def generate_user_id():
     return f"user_{uuid.uuid4().hex[:8]}"
 
+# Dropboxにファイルアップロードする関数
+def save_to_dropbox(user_id: str, filename: str, content: str):
+    try:
+        dbx.files_upload(
+            content.encode("utf-8"),
+            f"/{user_id}/{filename}",
+            mode=dropbox.files.WriteMode("overwrite")
+        )
+    except Exception as e:
+        print("Dropbox保存エラー:", e)
+
 @app.post("/register_user", operation_id="registerUser")
 def register_user():
     user_id = generate_user_id()
@@ -57,12 +68,13 @@ def photo_log(user_id: str = Form(...), file: UploadFile = File(...)):
         "version": "original"
     }
 
+    # ローカル保存
     local_path = os.path.join(user_dir, filename)
     with open(local_path, "w") as f:
         yaml.dump(data, f, allow_unicode=True)
 
-    with open(local_path, "rb") as f:
-        dbx.files_upload(f.read(), f"/{user_id}/{filename}", mode=dropbox.files.WriteMode("overwrite"))
+    # Dropbox保存
+    save_to_dropbox(user_id, filename, yaml.dump(data, allow_unicode=True))
 
     return {"yaml": yaml.dump(data), "advice": "『投稿時間を食事時間として登録しました』"}
 
@@ -74,6 +86,7 @@ def update_log(user_id: str = Form(...), timestamp: str = Form(...), content: st
 
     filename = f"{timestamp}.updated.yaml"
 
+    # YAML整形＆バリデーション処理
     cleaned = content.strip()
     try:
         data = yaml.safe_load(cleaned)
@@ -81,12 +94,14 @@ def update_log(user_id: str = Form(...), timestamp: str = Form(...), content: st
         raise HTTPException(status_code=400, detail=f"YAML形式エラー: {str(e)}")
 
     data["version"] = "updated"
+
+    # ローカル保存
     local_path = os.path.join(user_dir, filename)
     with open(local_path, "w") as f:
         yaml.dump(data, f, allow_unicode=True)
 
-    with open(local_path, "rb") as f:
-        dbx.files_upload(f.read(), f"/{user_id}/{filename}", mode=dropbox.files.WriteMode("overwrite"))
+    # Dropbox保存
+    save_to_dropbox(user_id, filename, yaml.dump(data, allow_unicode=True))
 
     return {"yaml": yaml.dump(data), "advice": "『修正内容を更新版として保存しました』"}
 
@@ -116,4 +131,7 @@ def daily_summary(user_id: str = Form(...), date: str = Form(...)):
                     yml = yaml.safe_load(f)
                     summary.append(yml)
 
-    return {"yaml": yaml.dump(summary, allow_unicode=True), "advice": f"『{date}のまとめを生成しました（{len(summary)}件）』"}
+    return {
+        "yaml": yaml.dump(summary, allow_unicode=True),
+        "advice": f"『{date}のまとめを生成しました（{len(summary)}件）』"
+    }
