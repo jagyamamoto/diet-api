@@ -3,7 +3,13 @@ from typing import Optional
 from datetime import datetime, timedelta
 import os, uuid, yaml
 
-app = FastAPI()
+app =FastAPI(
+    title="Diet API",
+    version="1.0.0",
+    servers=[
+        {"url": "https://diet-api-ebhn.onrender.com", "description": "Production"}
+    ]
+)
 
 BASE_DIR = "data"
 os.makedirs(BASE_DIR, exist_ok=True)
