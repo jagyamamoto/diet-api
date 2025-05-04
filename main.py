@@ -2,8 +2,16 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from typing import Optional
 from datetime import datetime, timedelta
 import os, uuid, yaml
+import dropbox
 
-app =FastAPI(
+# Dropboxアクセストークン（Renderの環境変数に設定しておくこと）
+DROPBOX_TOKEN = os.getenv("DROPBOX_TOKEN")
+if not DROPBOX_TOKEN:
+    raise RuntimeError("Dropbox access token not set in environment variable 'DROPBOX_TOKEN'.")
+
+dbx = dropbox.Dropbox(DROPBOX_TOKEN)
+
+app = FastAPI(
     title="Diet API",
     version="1.0.0",
     servers=[
@@ -11,7 +19,8 @@ app =FastAPI(
     ]
 )
 
-BASE_DIR = "data"
+# Render の Persistent Disk 対応パス
+BASE_DIR = "/persistent/data"
 os.makedirs(BASE_DIR, exist_ok=True)
 
 # 1. ランダムユーザーID発行
@@ -47,8 +56,13 @@ def photo_log(user_id: str = Form(...), file: UploadFile = File(...)):
         "posted_time": post_time.strftime("%Y-%m-%d %H:%M:%S"),
         "version": "original"
     }
-    with open(os.path.join(user_dir, filename), "w") as f:
+
+    local_path = os.path.join(user_dir, filename)
+    with open(local_path, "w") as f:
         yaml.dump(data, f, allow_unicode=True)
+
+    with open(local_path, "rb") as f:
+        dbx.files_upload(f.read(), f"/{user_id}/{filename}", mode=dropbox.files.WriteMode("overwrite"))
 
     return {"yaml": yaml.dump(data), "advice": "『投稿時間を食事時間として登録しました』"}
 
@@ -59,11 +73,20 @@ def update_log(user_id: str = Form(...), timestamp: str = Form(...), content: st
         raise HTTPException(status_code=404, detail="user not found")
 
     filename = f"{timestamp}.updated.yaml"
-    data = yaml.safe_load(content)
-    data["version"] = "updated"
 
-    with open(os.path.join(user_dir, filename), "w") as f:
+    cleaned = content.strip()
+    try:
+        data = yaml.safe_load(cleaned)
+    except yaml.YAMLError as e:
+        raise HTTPException(status_code=400, detail=f"YAML形式エラー: {str(e)}")
+
+    data["version"] = "updated"
+    local_path = os.path.join(user_dir, filename)
+    with open(local_path, "w") as f:
         yaml.dump(data, f, allow_unicode=True)
+
+    with open(local_path, "rb") as f:
+        dbx.files_upload(f.read(), f"/{user_id}/{filename}", mode=dropbox.files.WriteMode("overwrite"))
 
     return {"yaml": yaml.dump(data), "advice": "『修正内容を更新版として保存しました』"}
 
