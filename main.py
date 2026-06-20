@@ -52,8 +52,12 @@ RE_POSTAL = re.compile(r"〒?\s*(?<![\d-])(\d{3}[-－]\d{4})(?![\d-])")
 RE_PHONE = re.compile(
     r"(?<![\d+])((?:\+?81[-\s.]?|0)\d{1,4}[-\s.（(]?\d{1,4}[-\s.）)]?\d{3,4})(?!\d)"
 )
-# 名前らしい行（漢字/かな主体で空白区切りの2語、または短い日本語名）
+# 名前らしい行（漢字/かな主体で空白区切りの2語：例「西 宏司」）
 RE_JP_NAME = re.compile(r"^[一-鿿぀-ヿ々ヶ]{1,5}[\s　]+[一-鿿぀-ヿ々ヶ]{1,5}$")
+# 空白なしの日本語氏名（例「西宏司」）。2〜6文字の日本語のみ
+RE_JP_NAME_NOSP = re.compile(r"^[一-鿿぀-ヿ々ヶ\s　]{2,6}$")
+# 日本語（漢字/ひらがな/カタカナ）を1文字でも含むか
+RE_HAS_JP = re.compile(r"[一-鿿぀-ヿ]")
 
 
 def _normalize_phone(s: str) -> str:
@@ -161,22 +165,33 @@ def parse_business_card(text: str) -> dict:
             used.add(i)
             break
 
-    # 氏名（未使用の行から、空白区切りの日本語2語を最優先）
+    # 氏名（未使用の行から推定）
     name_candidates = [
         (i, line) for i, line in enumerate(lines)
         if i not in used and not RE_EMAIL.search(line)
         and not RE_PHONE.search(line) and not RE_URL.search(line)
+        and line not in TITLE_KEYWORDS
     ]
+    # 1) 空白区切りの日本語2語を最優先（例「西 宏司」）
     for i, line in name_candidates:
         if RE_JP_NAME.match(line):
             result["name"] = line
             used.add(i)
             break
-    # 見つからなければ、未使用の短い行を氏名とみなす
-    if not result["name"] and name_candidates:
-        i, line = name_candidates[0]
-        if len(line) <= 20:
-            result["name"] = line
+    # 2) 空白なしの日本語氏名（例「西宏司」）。役職語そのものは除外
+    if not result["name"]:
+        for i, line in name_candidates:
+            if RE_JP_NAME_NOSP.match(line) and not any(k == line for k in TITLE_KEYWORDS):
+                result["name"] = line
+                used.add(i)
+                break
+    # 3) フォールバック：日本語を含む短い行（英字ロゴ等は氏名にしない）
+    if not result["name"]:
+        for i, line in name_candidates:
+            if RE_HAS_JP.search(line) and len(line) <= 12:
+                result["name"] = line
+                used.add(i)
+                break
 
     return result
 
