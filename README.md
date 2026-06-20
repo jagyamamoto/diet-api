@@ -69,8 +69,28 @@ uvicorn main:app --reload
 # http://127.0.0.1:8000/docs で動作確認
 ```
 
+## 解析エンジン（ルール / AI）
+
+`POST /parse_card` は2通りの解析方式を持ち、レスポンスの `engine` で判別できます。
+
+| engine | 条件 | 特徴 |
+|---|---|---|
+| `gemini` | 環境変数 `GEMINI_API_KEY` が設定済み | Google Gemini（無料枠）で解析。氏名（漢字/カタカナ/英語）や向きの乱れに強い |
+| `rules`  | キー未設定 or API失敗時に自動フォールバック | 正規表現ベース。APIキー不要で常に動く |
+
+### Gemini を使う（推奨・無料枠）
+
+1. [Google AI Studio](https://aistudio.google.com/apikey) で API キーを無料発行
+2. 環境変数を設定：
+   - `GEMINI_API_KEY` … 発行したキー（必須）
+   - `GEMINI_MODEL` … 任意。既定は `gemini-2.0-flash`
+
+キーは無料枠で運用でき、依存パッケージの追加も不要（標準ライブラリで呼び出し）。
+
 ## デプロイ（Render 無料枠）
 
 `render.yaml` を含むこのリポジトリを Render の Blueprint として接続すると、
-`namecard-api` という Web サービスとして公開されます。環境変数の設定は不要です。
+`namecard-api` という Web サービスとして公開されます。
+AI解析を使う場合は、Render のサービス設定で環境変数 `GEMINI_API_KEY` を追加してください
+（未設定でもルール解析で動作します）。
 無料枠はアイドル時にスリープするため、初回アクセスは数十秒かかることがあります。
