@@ -14,8 +14,9 @@ import re, os, json, urllib.request
 app = FastAPI(title="Namecard API", version="1.0.0")
 
 # 抽出する項目（ルール解析・AI解析で共通のキー）
+# name_alt: 名刺に氏名が2言語で併記されている場合の、もう一方の表記
 CARD_FIELDS = [
-    "name", "company", "title",
+    "name", "name_alt", "company", "title",
     "tel", "mobile", "fax",
     "email", "url", "postal", "address",
 ]
@@ -210,14 +211,23 @@ def _vcard_escape(s: str) -> str:
 def build_vcard(data: dict) -> str:
     """構造化データから vCard 3.0 を生成（iOSの連絡先で取り込み可能）"""
     name = data.get("name", "").strip()
+    name_alt = data.get("name_alt", "").strip()
     # 空白区切りなら 姓・名 に分割（日本語名は「姓 名」が一般的）
     parts = re.split(r"[\s　]+", name) if name else []
     family = parts[0] if parts else ""
     given = parts[1] if len(parts) > 1 else ""
 
+    # 表示名（FN）。別言語の氏名があれば併記して両方を残す（例「山田 太郎 (Taro Yamada)」）
+    display = name or data.get("company", "")
+    if name_alt and name_alt != name:
+        display = f"{display} ({name_alt})" if display else name_alt
+
     lines = ["BEGIN:VCARD", "VERSION:3.0"]
     lines.append(f"N:{_vcard_escape(family)};{_vcard_escape(given)};;;")
-    lines.append(f"FN:{_vcard_escape(name or data.get('company', ''))}")
+    lines.append(f"FN:{_vcard_escape(display)}")
+    # 別言語の氏名はニックネームにも入れて、検索・参照できるようにする
+    if name_alt and name_alt != name:
+        lines.append(f"NICKNAME:{_vcard_escape(name_alt)}")
     if data.get("company"):
         lines.append(f"ORG:{_vcard_escape(data['company'])}")
     if data.get("title"):
@@ -254,8 +264,13 @@ GEMINI_PROMPT = (
     "あなたは名刺データの抽出器です。次のテキストは1枚の名刺をOCRしたもので、"
     "改行の順序や向き（縦書き・回転）が乱れていることがあります。"
     "ここから人物1名分の情報を読み取り、指定キーのJSONだけを返してください。\n"
-    "- name: 人物の氏名。会社名・ロゴ・部署・役職・キャッチコピーは絶対に入れない。"
-    "日本語・カタカナ・英語いずれも可。姓名の間は半角スペース1つにする。\n"
+    "- name: 人物の氏名（主表記）。会社名・ロゴ・部署・役職・キャッチコピーは絶対に入れない。"
+    "姓名の間は半角スペース1つにする。"
+    "名刺に氏名が日本語と英語（ローマ字）の両方で併記されている場合は、"
+    "日本語（漢字・かな・カタカナ）の表記を name に入れる。日本語表記が無ければ英語表記を入れる。\n"
+    "- name_alt: 同一人物の別言語の氏名表記。氏名が2言語で併記されている場合のみ、"
+    "name に入れなかったもう一方（多くは英語・ローマ字）を入れる。"
+    "片方の言語しか無い場合は空文字 \"\" にする。姓名の間は半角スペース1つにする。\n"
     "- company: 会社・組織名（株式会社/合同会社/大学/法人など）。\n"
     "- title: 役職・肩書き（部長/代表/教授/CEO/Founder など）。\n"
     "- tel: 固定電話、mobile: 携帯電話、fax: FAX。市外局番から、半角でハイフン区切りに整形。\n"
